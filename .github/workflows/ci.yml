@@ -1,8 +1,18 @@
 name: CI
 
+# Module 5: every pull request runs the app's checks and tests, then the
+# golden-set evals with the AI judge. main is protected: a pull request can be
+# merged only when these checks pass.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A newer push to the same pull request cancels the older run (and saves the
+# Gemini free-tier quota).
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -23,3 +33,80 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  evals:
+    # The golden set, graded by the AI judge; scores go to Langfuse, to this
+    # job's summary, to an "Eval scores" check and to a comment on the PR.
+    if: github.event_name == 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    env:
+      GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+      LANGFUSE_TRACING_ENVIRONMENT: ci
+      EVAL_COMMIT: ${{ github.event.pull_request.head.sha }}
+      EVAL_ARCHITECTURES: ${{ vars.EVAL_ARCHITECTURES || 'multi-agent,single-agent' }}
+      EVAL_MIN_PASS_RATE: ${{ vars.EVAL_MIN_PASS_RATE || '0.8' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Run the golden-set evals
+        run: npm run eval
+      - name: Show the eval scores on the pull request
+        if: always()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require("fs");
+            if (!fs.existsSync("eval-results.json")) {
+              core.warning("The evals didn't finish, so there are no scores.");
+              return;
+            }
+            const report = fs.readFileSync("eval-report.md", "utf8");
+            const runs = JSON.parse(fs.readFileSync("eval-results.json", "utf8"));
+            const min = Number(process.env.EVAL_MIN_PASS_RATE);
+            const pct = (n) => `${Math.round(n * 100)}%`;
+            const title = runs
+              .map((r) => `${r.architecture} ${pct(r.passRate)} (${r.passed}/${r.total})`)
+              .join(" · ");
+            const gate = runs.find((r) => r.architecture === "multi-agent");
+            const ok = !gate || gate.passRate >= min;
+            const sha = context.payload.pull_request.head.sha;
+            await github.rest.checks.create({
+              ...context.repo,
+              name: "Eval scores",
+              head_sha: sha,
+              status: "completed",
+              conclusion: ok ? "success" : "failure",
+              output: { title, summary: report.slice(0, 65000) },
+            });
+            const marker = "<!-- copper-eval-scores -->";
+            const body = `${marker}\n${report}\n\n_Commit ${sha.slice(0, 7)}_`;
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: context.issue.number,
+            });
+            const old = comments.find((c) => c.body?.includes(marker));
+            if (old)
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: old.id,
+                body,
+              });
+            else
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.issue.number,
+                body,
+              });
