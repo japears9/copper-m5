@@ -15,6 +15,7 @@
 // tool and no handoff ("single-agent") can stand in for the two agents, so the
 // evals can compare them.
 import { propagateAttributes, startActiveObservation } from "@langfuse/tracing";
+import { context, ROOT_CONTEXT } from "@opentelemetry/api";
 import { hasToolCall, stepCountIs } from "ai";
 import { callStream, THOUGHT_SUMMARIES } from "@/lib/ai/call";
 import { createLive, type Live } from "@/lib/ai/live";
@@ -278,72 +279,82 @@ export async function askCopper({
 
   // Read the stream in the background, so the panel gets the first update now.
   // The whole turn is one Langfuse trace (a no-op when tracing is off).
+  // In the app it starts its own trace (not under Next.js's request span,
+  // which isn't sent to Langfuse); in an eval it nests under the experiment.
   let traceId: string | undefined;
-  void startActiveObservation("ask-copper", (trace) => {
-    traceId = trace.traceId;
-    const question = messages.at(-1)?.content ?? "";
-    // The customer's message in, Copper's reply out: what a reviewer needs.
-    trace.update({ input: question });
-    return propagateAttributes(
-      {
-        traceName: "ask-copper",
-        sessionId,
-        tags: [architecture, ...tags],
-        metadata: { architecture },
-      },
-      async () => {
-        try {
-          if (!useTools) {
-            // Without tools, send no instructions either: "always use your
-            // tools" with no tools makes the model answer with nothing.
-            await runAgent("copper", () =>
-              callStream(
-                { module: 2, feature: "ask-copper" },
-                { messages, providerOptions: THOUGHT_SUMMARIES },
-              ),
-            );
-          } else {
-            let current = first;
-            for (let handoffs = 0; ; handoffs++) {
-              const agentNow = current;
-              const next = await runAgent(agentNow, () =>
-                agentCall(agentNow, messages, desk),
+  const parent = tags.includes("eval") ? context.active() : ROOT_CONTEXT;
+  void context.with(parent, () =>
+    startActiveObservation("ask-copper", (trace) => {
+      traceId = trace.traceId;
+      const question = messages.at(-1)?.content ?? "";
+      // The customer's message in, Copper's reply out: what a reviewer needs.
+      trace.update({ input: question });
+      return propagateAttributes(
+        {
+          traceName: "ask-copper",
+          sessionId,
+          tags: [architecture, ...tags],
+          metadata: { architecture },
+        },
+        async () => {
+          try {
+            if (!useTools) {
+              // Without tools, send no instructions either: "always use your
+              // tools" with no tools makes the model answer with nothing.
+              await runAgent("copper", () =>
+                callStream(
+                  { module: 2, feature: "ask-copper" },
+                  { messages, providerOptions: THOUGHT_SUMMARIES },
+                ),
               );
-              if (!next || next === current || handoffs >= MAX_HANDOFFS) break;
-              progress.steps.push({ type: "handoff", from: current, to: next });
-              progress.agent = current = next;
-              progress.reply = "";
-              call++;
-              update(snapshot());
+            } else {
+              let current = first;
+              for (let handoffs = 0; ; handoffs++) {
+                const agentNow = current;
+                const next = await runAgent(agentNow, () =>
+                  agentCall(agentNow, messages, desk),
+                );
+                if (!next || next === current || handoffs >= MAX_HANDOFFS)
+                  break;
+                progress.steps.push({
+                  type: "handoff",
+                  from: current,
+                  to: next,
+                });
+                progress.agent = current = next;
+                progress.reply = "";
+                call++;
+                update(snapshot());
+              }
             }
+            progress.status = "done";
+            if (!progress.reply.trim()) progress.reply = SORRY;
+          } catch {
+            progress.status = "error";
+            if (!progress.reply.trim()) progress.reply = SORRY;
           }
-          progress.status = "done";
-          if (!progress.reply.trim()) progress.reply = SORRY;
-        } catch {
-          progress.status = "error";
-          if (!progress.reply.trim()) progress.reply = SORRY;
-        }
-        const answeredBy = progress.agent ?? "copper";
-        trace.update({
-          output: {
-            reply: progress.reply,
-            answeredBy: AGENT_NAMES[answeredBy],
-          },
-          metadata: {
-            architecture,
-            answeredBy,
-            status: progress.status,
-            handoffs: progress.steps.filter((s) => s.type === "handoff").length,
-            tools: progress.steps.flatMap((s) =>
-              s.type === "tool" ? [s.name] : [],
-            ),
-          },
-          ...(progress.status === "error" && { level: "ERROR" as const }),
-        });
-        done(snapshot());
-      },
-    );
-  });
+          const answeredBy = progress.agent ?? "copper";
+          // The customer's message in, the reply out; the rest is metadata.
+          trace.update({
+            output: progress.reply,
+            metadata: {
+              architecture,
+              answeredBy: AGENT_NAMES[answeredBy],
+              turns: messages.length,
+              status: progress.status,
+              handoffs: progress.steps.filter((s) => s.type === "handoff")
+                .length,
+              tools: progress.steps.flatMap((s) =>
+                s.type === "tool" ? [s.name] : [],
+              ),
+            },
+            ...(progress.status === "error" && { level: "ERROR" as const }),
+          });
+          done(snapshot());
+        },
+      );
+    }),
+  );
 
   return { progress: live, traceId };
 }

@@ -194,9 +194,7 @@ golden set, and the same set runs on the two agents and on one support agent.
 The judge is Gemini through `lib/ai/call.ts`, the same model as the app, so
 it's cheap but may share the app's blind spots; code checks cover what a
 judge shouldn't guess (tools, order numbers, which agent answered). The evals
-call the real model, so they live in `npm run eval`, not `npm test`. Langfuse
-doesn't price every Gemini model, so the runner adds the app's prices
-(`lib/ai/pricing.ts`) as custom model prices.
+call the real model, so they live in `npm run eval`, not `npm test`.
 
 **Risks and open questions:** The free Gemini tier limits requests per day, so
 a full eval run (two architectures) uses a good share of it. LLM answers vary

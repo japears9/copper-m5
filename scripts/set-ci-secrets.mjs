@@ -27,6 +27,16 @@ const env = Object.fromEntries(
     }),
 );
 
+// The student's own repo (origin), not the course repo.
+const origin = spawnSync("git", ["remote", "get-url", "origin"], {
+  encoding: "utf8",
+}).stdout.trim();
+const repo = origin.match(/github\.com[:/](.+?)(\.git)?$/)?.[1];
+if (!repo) {
+  console.error("Couldn't find this repo's GitHub origin.");
+  process.exit(1);
+}
+
 let failed = false;
 for (const name of NAMES) {
   if (!env[name]) {
@@ -34,7 +44,7 @@ for (const name of NAMES) {
     failed = true;
     continue;
   }
-  const result = spawnSync("gh", ["secret", "set", name], {
+  const result = spawnSync("gh", ["secret", "set", name, "--repo", repo], {
     input: env[name],
     stdio: ["pipe", "inherit", "inherit"],
   });

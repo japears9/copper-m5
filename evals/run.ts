@@ -12,7 +12,6 @@ import { LangfuseClient } from "@langfuse/client";
 import { onAiCall, type AiCallRow } from "@/lib/ai/call";
 import { finalValue } from "@/lib/ai/live";
 import { defaultModel } from "@/lib/ai/models";
-import { PRICING } from "@/lib/ai/pricing";
 import {
   flushTracing,
   isTracingConfigured,
@@ -184,24 +183,6 @@ function summarize(
   };
 }
 
-/** Langfuse doesn't price every Gemini model: teach it the app's prices. */
-async function ensureModelPrices(langfuse: LangfuseClient) {
-  for (const [id, price] of Object.entries(PRICING)) {
-    const name = id.slice("google/".length);
-    try {
-      await langfuse.api.models.upsert(`copper-${name.replaceAll(".", "-")}`, {
-        modelName: name,
-        matchPattern: `(?i)^(google/)?(${name.replaceAll(".", "\\.")})(-preview)?$`,
-        unit: "TOKENS",
-        inputPrice: price.input / 1_000_000,
-        outputPrice: price.output / 1_000_000,
-      });
-    } catch (error) {
-      console.warn(`Couldn't set the Langfuse price for ${name}:`, error);
-    }
-  }
-}
-
 /** Creates or updates the golden set as a Langfuse dataset. */
 async function syncDataset(langfuse: LangfuseClient) {
   try {
@@ -240,7 +221,6 @@ export async function runGoldenSet(
   const langfuse = traced ? new LangfuseClient() : undefined;
   startTracing();
   if (langfuse) {
-    await ensureModelPrices(langfuse);
     await syncDataset(langfuse);
   } else {
     console.warn(
