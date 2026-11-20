@@ -171,3 +171,33 @@ the tests and a golden-set evaluation with an AI judge run in GitHub Actions
 on every pull request, with `main` protected; every AI call is traced in
 Langfuse; and one support agent that does everything is compared with the two
 agents on the same golden set. Langfuse is the only eval and monitoring tool.
+
+## Module 5: safe to ship (CI, Langfuse tracing, evals, single vs multi agent)
+
+**Summary:** Pull requests run the tests and the golden-set evals in GitHub
+Actions, and `main` only takes changes through a pull request whose checks
+pass. Every chat turn is a Langfuse trace. An AI judge grades Ask Copper on a
+golden set, and the same set runs on the two agents and on one support agent.
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| Tracing setup | `instrumentation.ts`, `lib/ai/tracing.ts` | When `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set, registers the Langfuse span processor (OpenTelemetry) and Langfuse's AI SDK 7 integration (`@langfuse/vercel-ai-sdk`). Off without keys, so the app and tests still run |
+| Chat trace | `lib/copper/assistant/ask.ts` | Each turn is one trace, `ask-copper`: input is the customer's message, output is the reply, metadata says the architecture, which agent answered, the handoffs and the tools. Each agent is an `agent` observation (`copper-agent`, `refund-agent`, `support-agent`) holding its generations (model, tokens, cost, thinking) and tool calls. The chat panel sends a `sessionId`, so a conversation is one Langfuse session |
+| Single support agent | `instructions.ts` (`SUPPORT_AGENT_INSTRUCTIONS`), `tools.ts` (`supportAgentTools`), `ask.ts` | `architecture: "single-agent"` (or `COPPER_ARCHITECTURE=single-agent`): one agent with every tool and no handoff. The refund rule is still code |
+| Golden set | `evals/golden-set.ts` | 10 questions (refunds under and over the limit, status, unknown order, which order, a fake "already approved", the refund policy, an error code, a total cost, off-topic) with what a good answer does and code checks |
+| AI judge | `evals/judge.ts` | `{ module: 5, feature: "eval-judge" }` through `callObject`: reason, a 1-5 score and pass/fail |
+| Eval runner | `evals/run.ts`, `evals/golden-set.eval.ts`, `npm run eval` | Syncs the golden set to the Langfuse dataset `copper-golden-set` and runs it as a Langfuse experiment per architecture. Scores per answer: `pass`, `judge`, `judge_score`, `checks`, `latency_s`, `cost_usd`; per run: `pass_rate`, `avg_latency_s`, `avg_cost_usd`, `total_cost_usd`. Writes `eval-report.md`. Fails when the multi-agent pass rate is under `EVAL_MIN_PASS_RATE` (0.8) |
+| CI | `.github/workflows/ci.yml` | `check` (lint, typecheck, tests, build on Linux, macOS, Windows) on pushes to `main` and pull requests; `evals` on pull requests, which also posts an "Eval scores" check and a PR comment. Keys come from the repo's Actions secrets (`npm run ci:secrets`) |
+| Keys | `scripts/add-langfuse-keys.mjs` (`npm run langfuse:keys`) | Asks for the Langfuse keys with hidden input and saves them to `.env.local` |
+
+**Decisions and trade-offs:** Langfuse is the only eval and monitoring tool.
+The judge is Gemini through `lib/ai/call.ts`, the same model as the app, so
+it's cheap but may share the app's blind spots; code checks cover what a
+judge shouldn't guess (tools, order numbers, which agent answered). The evals
+call the real model, so they live in `npm run eval`, not `npm test`. Langfuse
+doesn't price every Gemini model, so the runner adds the app's prices
+(`lib/ai/pricing.ts`) as custom model prices.
+
+**Risks and open questions:** The free Gemini tier limits requests per day, so
+a full eval run (two architectures) uses a good share of it. LLM answers vary
+run to run, so a pass rate can move a little without a code change.

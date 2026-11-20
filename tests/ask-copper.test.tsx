@@ -312,12 +312,17 @@ describe("Part A: the Ask Copper chat widget", () => {
         },
       ],
       useTools: true,
+      // Module 5: one Langfuse session per conversation.
+      sessionId: expect.any(String),
     });
 
     // A follow-up in the same conversation carries the earlier turns.
     await ask(chat, "And for 3 years?");
     await waitFor(() => expect(askCopper).toHaveBeenCalledTimes(2));
     expect(askCopper.mock.calls[1][0].messages).toHaveLength(3);
+    expect(askCopper.mock.calls[1][0].sessionId).toBe(
+      askCopper.mock.calls[0][0].sessionId,
+    );
     await waitFor(() =>
       expect(chat.getAllByText(/comes to \$307/)).toHaveLength(2),
     );
@@ -336,7 +341,11 @@ describe("Part A: the Ask Copper chat widget", () => {
         },
       ],
       useTools: false,
+      sessionId: expect.any(String),
     });
+    expect(askCopper.mock.calls[2][0].sessionId).not.toBe(
+      askCopper.mock.calls[0][0].sessionId,
+    );
 
     // Switching back shows the tools-on conversation again.
     await waitFor(() =>
